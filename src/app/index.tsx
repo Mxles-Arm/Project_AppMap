@@ -19,44 +19,39 @@ import { useLocation } from '../hooks/useLocation';
 import { findNearest, formatDistance, haversine } from '../utils/distance';
 import { formatRelativeTime } from '../utils/time';
 import { getStats, recordAdded, recordConfirmed, recordStatusUpdated, type ContributionStats } from '../utils/stats';
-
-const STATUS_LABEL: Record<ToiletStatus, string> = {
-  available: 'ใช้งานได้',
-  closed: 'ปิดซ่อม',
-  no_paper: 'ไม่มีกระดาษ',
-};
-
-const STATUS_COLOR: Record<ToiletStatus, string> = {
-  available: '#16A34A',
-  closed: '#DC2626',
-  no_paper: '#D97706',
-};
+import { AccessibleGlyph, RestroomGlyph } from '../components/glyphs';
+import { useLanguage } from '../i18n/useLanguage';
 
 const KMUTNB = { latitude: 13.819552, longitude: 100.514812 };
 const DELTA = { latitudeDelta: 0.005, longitudeDelta: 0.005 };
 
-// Design system: Flat Design Mobile (Touch-First) + Medical Teal palette (UIUX-Pro)
+// Natural palette — moss/teal tones on clean, solid surfaces.
 const C = {
-  primary: '#0891B2',
-  primaryDark: '#0E7490',
-  accent: '#16A34A',
-  urgent: '#DC2626',
-  accessible: '#7C3AED',
-  bg: '#F0FDFA',
+  ink: '#1C2521',
+  inkSoft: '#5B6B60',
+  paper: '#F5F2E9',
   surface: '#FFFFFF',
-  muted: '#E6F7F5',
-  border: '#CCFBF1',
-  text: '#134E4A',
-  textMuted: '#64748B',
+  line: '#D6E4D0',
+  primary: '#0D9488',
+  primaryDark: '#0F766E',
+  urgent: '#DC2626',
 };
 
 export default function Index() {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView>(null);
   const { location } = useLocation();
+  const { language, setLanguage, t } = useLanguage();
+
+  const STATUS_LABEL: Record<ToiletStatus, string> = {
+    available: t.statusAvailable,
+    closed: t.statusClosed,
+    no_paper: t.statusNoPaper,
+  };
 
   const [toilets, setToilets] = useState<Toilet[]>([]);
   const [nearest, setNearest] = useState<{ toilet: Toilet; distance: number; skippedClosed?: boolean } | null>(null);
+  const [resultExpanded, setResultExpanded] = useState(true);
   const [route, setRoute] = useState<{ latitude: number; longitude: number }[] | null>(null);
   const [walkInfo, setWalkInfo] = useState<{ distanceMeters: number; durationSeconds: number } | null>(null);
   const [routeLoading, setRouteLoading] = useState(false);
@@ -66,6 +61,7 @@ export default function Index() {
   const [searchQuery, setSearchQuery] = useState('');
   const [stats, setStats] = useState<ContributionStats>({ added: 0, confirmed: 0, statusUpdated: 0 });
   const [statsVisible, setStatsVisible] = useState(false);
+  const [pickedPoint, setPickedPoint] = useState<{ latitude: number; longitude: number } | null>(null);
 
   // Form state
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -79,6 +75,9 @@ export default function Index() {
     getStats().then(setStats);
   }, []);
 
+  // Fetches the walking route from the Directions API whenever the focused toilet or
+  // location changes; synchronizing with this external API is exactly what an effect is for.
+  /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
   useEffect(() => {
     if (!nearest || !location) {
       setRoute(null);
@@ -101,6 +100,7 @@ export default function Index() {
       .finally(() => { if (active) setRouteLoading(false); });
     return () => { active = false; };
   }, [nearest?.toilet.id, location?.latitude, location?.longitude]);
+  /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
 
   async function loadToilets() {
     const data = await getAll();
@@ -109,16 +109,17 @@ export default function Index() {
 
   function handleFindNearest() {
     if (!location) {
-      Alert.alert('ยังไม่ได้รับตำแหน่ง', 'กรุณารอสักครู่แล้วลองใหม่');
+      Alert.alert(t.alertNoLocationTitle, t.alertNoLocationBody);
       return;
     }
     if (toilets.length === 0) {
-      Alert.alert('ยังไม่มีข้อมูลห้องน้ำ', 'กดปุ่ม + เพื่อเพิ่มจุดห้องน้ำก่อน');
+      Alert.alert(t.alertNoToiletsTitle, t.alertNoToiletsBody);
       return;
     }
     const result = findNearest(toilets, location);
     if (!result) return;
     setNearest(result);
+    setResultExpanded(true);
     mapRef.current?.animateToRegion({
       latitude: result.toilet.latitude,
       longitude: result.toilet.longitude,
@@ -126,15 +127,16 @@ export default function Index() {
     }, 600);
   }
 
-  function openModal() {
-    if (!location) {
-      Alert.alert('ยังไม่ได้รับตำแหน่ง', 'กรุณารอให้แอปรับตำแหน่งก่อน');
+  function openModal(point?: { latitude: number; longitude: number }) {
+    if (!point && !location) {
+      Alert.alert(t.alertNoLocationTitle, t.alertNoLocationBodyWait);
       return;
     }
     setEditingId(null);
     setBuilding('');
     setFloor('');
     setAccessible(false);
+    setPickedPoint(point ?? null);
     setModalVisible(true);
   }
 
@@ -144,12 +146,17 @@ export default function Index() {
     setBuilding(t.building);
     setFloor(t.floor);
     setAccessible(t.accessible === 1);
+    setPickedPoint(null);
     setModalVisible(true);
+  }
+
+  function handleMapLongPress(e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) {
+    openModal(e.nativeEvent.coordinate);
   }
 
   async function handleSave() {
     if (!building.trim()) {
-      Alert.alert('กรุณากรอกชื่ออาคาร');
+      Alert.alert(t.alertNeedBuilding);
       return;
     }
     setSaving(true);
@@ -161,19 +168,21 @@ export default function Index() {
           accessible: accessible ? 1 : 0,
         });
       } else {
-        if (!location) return;
+        const point = pickedPoint ?? location;
+        if (!point) return;
         await insert({
           building: building.trim(),
           floor: floor.trim(),
           accessible: accessible ? 1 : 0,
-          latitude: location.latitude,
-          longitude: location.longitude,
+          latitude: point.latitude,
+          longitude: point.longitude,
         });
         setStats(await recordAdded());
       }
       await loadToilets();
       setNearest(null);
       setModalVisible(false);
+      setPickedPoint(null);
     } finally {
       setSaving(false);
     }
@@ -181,12 +190,12 @@ export default function Index() {
 
   async function handleDelete(id: number, name: string) {
     Alert.alert(
-      'ลบห้องน้ำ',
-      `ต้องการลบ "${name}" ออกจากแผนที่?`,
+      t.alertDeleteTitle,
+      t.alertDeleteBody(name),
       [
-        { text: 'ยกเลิก', style: 'cancel' },
+        { text: t.alertCancel, style: 'cancel' },
         {
-          text: 'ลบ',
+          text: t.alertDelete,
           style: 'destructive',
           onPress: async () => {
             await remove(id);
@@ -224,14 +233,14 @@ export default function Index() {
 
   function handleUrgentMode(accessibleOnlyMode = false) {
     if (!location) {
-      Alert.alert('ยังไม่ได้รับตำแหน่ง', 'กรุณารอสักครู่แล้วลองใหม่');
+      Alert.alert(t.alertNoLocationTitle, t.alertNoLocationBody);
       return;
     }
-    const pool = accessibleOnlyMode ? toilets.filter(t => t.accessible === 1) : toilets;
+    const pool = accessibleOnlyMode ? toilets.filter(toilet => toilet.accessible === 1) : toilets;
     if (pool.length === 0) {
       Alert.alert(
-        accessibleOnlyMode ? 'ยังไม่มีข้อมูลห้องน้ำผู้พิการ' : 'ยังไม่มีข้อมูลห้องน้ำ',
-        'กดปุ่ม + เพื่อเพิ่มจุดห้องน้ำก่อน'
+        accessibleOnlyMode ? t.alertNoToiletsAccessibleTitle : t.alertNoToiletsTitle,
+        t.alertNoToiletsBody
       );
       return;
     }
@@ -267,14 +276,34 @@ export default function Index() {
     }, 600);
     if (location) {
       setNearest({ toilet: t, distance: haversine(location.latitude, location.longitude, t.latitude, t.longitude) });
+      setResultExpanded(true);
     }
   }
 
+  const distanceSortedToilets = useMemo(() => {
+    if (!location) return toilets;
+    return [...toilets].sort((a, b) =>
+      haversine(location.latitude, location.longitude, a.latitude, a.longitude) -
+      haversine(location.latitude, location.longitude, b.latitude, b.longitude)
+    );
+  }, [toilets, location]);
+
+  function focusToiletByOffset(offset: number) {
+    if (!nearest || distanceSortedToilets.length === 0) return;
+    const currentIndex = distanceSortedToilets.findIndex(t => t.id === nearest.toilet.id);
+    if (currentIndex === -1) return;
+    const nextIndex = (currentIndex + offset + distanceSortedToilets.length) % distanceSortedToilets.length;
+    focusToilet(distanceSortedToilets[nextIndex]);
+  }
+
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
+    <View style={styles.container}>
       {/* Header */}
-      <View style={styles.header}>
-        <View style={styles.headerTopRow}>
+      <View style={[styles.header, { paddingTop: insets.top + 14 }]}>
+        <View style={styles.headerCard}>
+          <View style={styles.headerIcon}>
+            <RestroomGlyph size={24} color={C.primary} />
+          </View>
           <TouchableOpacity
             style={styles.headerMain}
             onPress={() => setListVisible(true)}
@@ -282,48 +311,29 @@ export default function Index() {
             disabled={toilets.length === 0}
           >
             <View>
-              <Text style={styles.headerTitle}>LooMap</Text>
+              <Text style={styles.headerTitle}>{t.appName}</Text>
               <Text style={styles.headerSub}>
                 {toilets.length > 0
-                  ? `${toilets.length} จุด · แตะเพื่อดูรายการ`
-                  : location ? 'ยังไม่มีข้อมูล — กด + เพื่อเริ่ม' : 'กำลังหาตำแหน่ง…'}
+                  ? t.headerSubCount(toilets.length)
+                  : location ? t.headerSubEmpty : t.headerSubLocating}
               </Text>
             </View>
-            {toilets.length > 0 && <Text style={styles.headerChevron}>›</Text>}
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.statsBtn}
             onPress={() => setStatsVisible(true)}
             activeOpacity={0.7}
           >
-            <Text style={styles.statsBtnText}>คุณ</Text>
+            <Text style={styles.statsBtnText}>{t.statsBtn}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.addBtn}
-            onPress={openModal}
+            onPress={() => openModal()}
             activeOpacity={0.7}
           >
-            <Text style={styles.addBtnText}>+ เพิ่มจุด</Text>
+            <Text style={styles.addBtnText}>{t.addBtn}</Text>
           </TouchableOpacity>
         </View>
-
-        {/* Legend */}
-        {toilets.length > 0 && (
-          <View style={styles.legend}>
-            <View style={styles.legendItem}>
-              <View style={[styles.legendDot, { backgroundColor: C.primary }]} />
-              <Text style={styles.legendText}>ทั่วไป</Text>
-            </View>
-            <View style={styles.legendItem}>
-              <View style={[styles.legendDot, { backgroundColor: C.accessible }]} />
-              <Text style={styles.legendText}>♿ ผู้พิการ</Text>
-            </View>
-            <View style={styles.legendItem}>
-              <View style={[styles.legendDot, { backgroundColor: STATUS_COLOR.closed }]} />
-              <Text style={styles.legendText}>ปิดซ่อม</Text>
-            </View>
-          </View>
-        )}
       </View>
 
       {/* Map */}
@@ -334,117 +344,166 @@ export default function Index() {
         initialRegion={{ ...KMUTNB, ...DELTA }}
         showsUserLocation
         showsMyLocationButton={false}
+        onLongPress={handleMapLongPress}
       >
         {toilets.map(t => (
           <Marker
             key={t.id}
             coordinate={{ latitude: t.latitude, longitude: t.longitude }}
-            pinColor={t.status !== 'available' ? STATUS_COLOR[t.status] : (t.accessible ? C.accessible : C.primary)}
+            pinColor={t.status === 'closed' ? '#DC2626' : '#22C55E'}
             onPress={() => focusToilet(t)}
           />
         ))}
+        {pickedPoint && modalVisible && editingId === null && (
+          <Marker coordinate={pickedPoint} pinColor="#F59E0B" />
+        )}
         {route && (
-          <Polyline coordinates={route} strokeColor={C.primary} strokeWidth={4} />
+          <Polyline coordinates={route} strokeColor={C.ink} strokeWidth={4} />
         )}
       </MapView>
 
+
       {/* Recenter button */}
-      <TouchableOpacity
-        style={styles.recenterBtn}
-        onPress={recenter}
-        activeOpacity={0.85}
-      >
-        <Text style={styles.recenterIcon}>◎</Text>
-      </TouchableOpacity>
+      {!nearest && (
+        <TouchableOpacity
+          style={[styles.recenterBtn, { bottom: insets.bottom + 152 }]}
+          onPress={recenter}
+          activeOpacity={0.85}
+        >
+          <View style={styles.recenterRing} />
+        </TouchableOpacity>
+      )}
 
       {/* Result card */}
       {nearest && (
-        <View style={[styles.resultCard, { bottom: insets.bottom + 156 }]}>
+        <View style={[styles.resultCard, { paddingBottom: insets.bottom }]}>
           <View style={styles.resultSection}>
             <View style={styles.resultTitleRow}>
               <Text style={styles.resultBuilding} numberOfLines={1}>
                 {nearest.toilet.building}
                 {nearest.toilet.floor ? ` · ${nearest.toilet.floor}` : ''}
               </Text>
+              {nearest.toilet.accessible === 1 && (
+                <AccessibleGlyph size={16} color={C.inkSoft} />
+              )}
               <TouchableOpacity
-                style={styles.resultCloseBtn}
+                style={styles.resultIconBtn}
+                onPress={() => setResultExpanded(v => !v)}
+                activeOpacity={0.7}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Text style={styles.resultIconBtnText}>{resultExpanded ? '⌄' : '⌃'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.resultIconBtn}
                 onPress={() => setNearest(null)}
                 activeOpacity={0.7}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
-                <Text style={styles.resultCloseText}>✕</Text>
+                <Text style={styles.resultIconBtnText}>✕</Text>
               </TouchableOpacity>
             </View>
 
-            {nearest.toilet.accessible === 1 && (
-              <Text style={styles.resultAccessible}>♿ มีห้องน้ำผู้พิการ</Text>
+            {distanceSortedToilets.length > 1 && (
+              <View style={styles.resultNavRow}>
+                <TouchableOpacity
+                  style={styles.resultNavArrow}
+                  onPress={() => focusToiletByOffset(-1)}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Text style={styles.resultNavArrowText}>‹</Text>
+                </TouchableOpacity>
+                <Text style={styles.resultNavPosition}>
+                  {distanceSortedToilets.findIndex(item => item.id === nearest.toilet.id) + 1} / {distanceSortedToilets.length}
+                </Text>
+                <TouchableOpacity
+                  style={styles.resultNavArrow}
+                  onPress={() => focusToiletByOffset(1)}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Text style={styles.resultNavArrowText}>›</Text>
+                </TouchableOpacity>
+              </View>
             )}
 
             {routeLoading ? (
-              <Text style={styles.resultWalkLoading}>กำลังคำนวณเส้นทาง…</Text>
+              <Text style={styles.resultWalkLoading}>{t.resultCalculating}</Text>
             ) : walkInfo ? (
               <Text style={styles.resultDistance}>
-                เดิน {formatDuration(walkInfo.durationSeconds)} · {formatDistance(walkInfo.distanceMeters)}
+                {t.resultWalk(formatDuration(walkInfo.durationSeconds), formatDistance(walkInfo.distanceMeters))}
               </Text>
             ) : (
               <Text style={styles.resultDistance}>{formatDistance(nearest.distance)}</Text>
             )}
           </View>
 
-          <View style={styles.resultDivider} />
+          {resultExpanded && (
+            <>
+              <View style={styles.resultDivider} />
 
-          <View style={styles.resultSection}>
-            <Text style={styles.resultSectionLabel}>สถานะตอนนี้</Text>
-            <View style={styles.statusRow}>
-              {(['available', 'closed', 'no_paper'] as ToiletStatus[]).map(s => (
+              <View style={styles.resultSection}>
+                <Text style={styles.resultSectionLabel}>{t.resultStatusNow}</Text>
+                <View style={styles.statusRow}>
+                  {(['available', 'closed', 'no_paper'] as ToiletStatus[]).map(s => {
+                    const active = nearest.toilet.status === s;
+                    return (
+                      <TouchableOpacity
+                        key={s}
+                        style={[
+                          styles.statusChip,
+                          active && (s === 'closed' ? styles.statusChipUrgent : styles.statusChipActive),
+                        ]}
+                        onPress={() => handleSetStatus(nearest.toilet.id, s)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={[
+                          styles.statusChipText,
+                          active && (s === 'closed' ? styles.statusChipUrgentText : styles.statusChipActiveText),
+                        ]}>
+                          {STATUS_LABEL[s]}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <View style={styles.updatedRow}>
+                  <Text style={styles.updatedText}>{t.resultUpdated(formatRelativeTime(nearest.toilet.updated_at))}</Text>
+                  <TouchableOpacity onPress={() => handleConfirm(nearest.toilet.id)} activeOpacity={0.7}>
+                    <Text style={styles.confirmText}>{t.resultConfirm}</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              <View style={styles.resultDivider} />
+
+              <View style={styles.resultCardActions}>
                 <TouchableOpacity
-                  key={s}
-                  style={[
-                    styles.statusChip,
-                    nearest.toilet.status === s && { backgroundColor: STATUS_COLOR[s], borderColor: STATUS_COLOR[s] },
-                  ]}
-                  onPress={() => handleSetStatus(nearest.toilet.id, s)}
-                  activeOpacity={0.8}
+                  style={styles.resultNavBtn}
+                  onPress={() => navigateTo(nearest.toilet)}
+                  activeOpacity={0.85}
                 >
-                  <Text style={[styles.statusChipText, nearest.toilet.status === s && { color: '#FFF' }]}>
-                    {STATUS_LABEL[s]}
-                  </Text>
+                  <Text style={styles.resultNavText}>{t.resultNav}</Text>
                 </TouchableOpacity>
-              ))}
-            </View>
-            <View style={styles.updatedRow}>
-              <Text style={styles.updatedText}>อัปเดต {formatRelativeTime(nearest.toilet.updated_at)}</Text>
-              <TouchableOpacity onPress={() => handleConfirm(nearest.toilet.id)} activeOpacity={0.7}>
-                <Text style={styles.confirmText}>ยืนยันว่ายังถูกต้อง</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          <View style={styles.resultDivider} />
-
-          <View style={styles.resultCardActions}>
-            <TouchableOpacity
-              style={styles.resultNavBtn}
-              onPress={() => navigateTo(nearest.toilet)}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.resultNavText}>นำทาง</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.resultDeleteBtn}
-              onPress={() => handleDelete(nearest.toilet.id, `${nearest.toilet.building} ${nearest.toilet.floor}`)}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.resultDeleteText}>ลบจุดนี้</Text>
-            </TouchableOpacity>
-          </View>
+                <TouchableOpacity
+                  style={styles.resultDeleteBtn}
+                  onPress={() => handleDelete(nearest.toilet.id, `${nearest.toilet.building} ${nearest.toilet.floor}`)}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.resultDeleteText}>{t.resultDelete}</Text>
+                </TouchableOpacity>
+              </View>
+            </>
+          )}
         </View>
       )}
 
       {/* Bottom controls */}
+      {!nearest && (
       <View style={[styles.bottomBar, { paddingBottom: insets.bottom + 14 }]}>
         <TouchableOpacity style={styles.btnFind} onPress={handleFindNearest} activeOpacity={0.9}>
-          <Text style={styles.btnFindText}>หาห้องน้ำใกล้สุด</Text>
+          <Text style={styles.btnFindText}>{t.btnFind}</Text>
         </TouchableOpacity>
 
         <View style={styles.urgentRow}>
@@ -453,56 +512,62 @@ export default function Index() {
             onPress={() => handleUrgentMode(false)}
             activeOpacity={0.85}
           >
-            <Text style={styles.btnUrgentText}>เร่งด่วน — นำทางทันที</Text>
+            <Text style={styles.btnUrgentText}>{t.btnUrgent}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.btnUrgentAccessible}
             onPress={() => handleUrgentMode(true)}
             activeOpacity={0.85}
           >
-            <Text style={styles.btnUrgentAccessibleText}>♿</Text>
+            <AccessibleGlyph size={16} color={C.ink} />
+            <Text style={styles.btnUrgentAccessibleText}>{t.btnUrgentAccessible}</Text>
           </TouchableOpacity>
         </View>
       </View>
+      )}
 
       {/* Add Modal */}
       <Modal
         visible={modalVisible}
         animationType="slide"
         transparent
-        onRequestClose={() => setModalVisible(false)}
+        onRequestClose={() => { setModalVisible(false); setPickedPoint(null); }}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalSheet}>
-            <Text style={styles.modalTitle}>{editingId !== null ? 'แก้ไขห้องน้ำ' : 'เพิ่มห้องน้ำ'}</Text>
+            <Text style={styles.modalTitle}>{editingId !== null ? t.modalEditTitle : t.modalAddTitle}</Text>
             <Text style={styles.modalSub}>
-              {editingId !== null ? 'แก้ไขข้อมูลอาคาร/ชั้น (พิกัดเดิมไม่เปลี่ยน)' : 'พิกัดดึงจากตำแหน่งปัจจุบันของคุณอัตโนมัติ'}
+              {editingId !== null
+                ? t.modalEditSub
+                : pickedPoint
+                  ? t.modalPickedSub
+                  : t.modalGpsSub}
             </Text>
 
-            <Text style={styles.fieldLabel}>ชื่ออาคาร *</Text>
+            <Text style={styles.fieldLabel}>{t.fieldBuilding}</Text>
             <TextInput
               style={styles.input}
-              placeholder="เช่น อาคาร 44"
-              placeholderTextColor={C.textMuted}
+              placeholder={t.fieldBuildingPlaceholder}
+              placeholderTextColor={C.inkSoft}
               value={building}
               onChangeText={setBuilding}
             />
 
-            <Text style={styles.fieldLabel}>ชั้น</Text>
+            <Text style={styles.fieldLabel}>{t.fieldFloor}</Text>
             <TextInput
               style={styles.input}
-              placeholder="เช่น ชั้น 2"
-              placeholderTextColor={C.textMuted}
+              placeholder={t.fieldFloorPlaceholder}
+              placeholderTextColor={C.inkSoft}
               value={floor}
               onChangeText={setFloor}
             />
 
             <View style={styles.switchRow}>
-              <Text style={styles.fieldLabel}>♿ ห้องน้ำผู้พิการ</Text>
+              <Text style={styles.fieldLabel}>{t.fieldAccessible}</Text>
               <Switch
                 value={accessible}
                 onValueChange={setAccessible}
-                trackColor={{ false: C.border, true: C.accessible }}
+                trackColor={{ false: C.line, true: C.ink }}
                 thumbColor={C.surface}
               />
             </View>
@@ -510,10 +575,10 @@ export default function Index() {
             <View style={styles.modalActions}>
               <TouchableOpacity
                 style={styles.btnCancel}
-                onPress={() => setModalVisible(false)}
+                onPress={() => { setModalVisible(false); setPickedPoint(null); }}
                 activeOpacity={0.8}
               >
-                <Text style={styles.btnCancelText}>ยกเลิก</Text>
+                <Text style={styles.btnCancelText}>{t.alertCancel}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.btnSave, saving && styles.btnDisabled]}
@@ -522,7 +587,7 @@ export default function Index() {
                 disabled={saving}
               >
                 <Text style={styles.btnSaveText}>
-                  {saving ? 'กำลังบันทึก…' : editingId !== null ? 'บันทึกการแก้ไข' : 'บันทึก'}
+                  {saving ? t.btnSaving : editingId !== null ? t.btnSaveEdit : t.btnSave}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -540,44 +605,44 @@ export default function Index() {
         <View style={styles.modalOverlay}>
           <View style={[styles.modalSheet, styles.listSheet]}>
             <View style={styles.listHeader}>
-              <Text style={styles.modalTitle}>รายการห้องน้ำ ({sortedFilteredToilets.length})</Text>
+              <Text style={styles.modalTitle}>{t.listTitle(sortedFilteredToilets.length)}</Text>
               <TouchableOpacity
                 style={[styles.filterChip, accessibleOnly && styles.filterChipActive]}
                 onPress={() => setAccessibleOnly(v => !v)}
                 activeOpacity={0.8}
               >
-                <Text style={[styles.filterChipText, accessibleOnly && styles.filterChipTextActive]}>
-                  ♿ เฉพาะผู้พิการ
+                <Text style={[styles.filterChipText, accessibleOnly && styles.filterChipActiveText]}>
+                  {t.listAccessibleOnly}
                 </Text>
               </TouchableOpacity>
             </View>
             <TextInput
               style={styles.searchInput}
-              placeholder="ค้นหาอาคาร/ชั้น เช่น อาคาร 44"
-              placeholderTextColor={C.textMuted}
+              placeholder={t.searchPlaceholder}
+              placeholderTextColor={C.inkSoft}
               value={searchQuery}
               onChangeText={setSearchQuery}
             />
-            <Text style={styles.modalSub}>เรียงจากใกล้ไปไกล</Text>
+            <Text style={styles.modalSub}>{t.listSortHint}</Text>
             <ScrollView style={styles.listScroll}>
-              {sortedFilteredToilets.map(t => {
+              {sortedFilteredToilets.map(item => {
                 const dist = location
-                  ? haversine(location.latitude, location.longitude, t.latitude, t.longitude)
+                  ? haversine(location.latitude, location.longitude, item.latitude, item.longitude)
                   : null;
                 return (
-                  <View key={t.id} style={styles.listRow}>
+                  <View key={item.id} style={styles.listRow}>
                     <TouchableOpacity
                       style={styles.listRowMain}
-                      onPress={() => focusToilet(t)}
+                      onPress={() => focusToilet(item)}
                       activeOpacity={0.7}
                     >
-                      <View style={[styles.legendDot, { backgroundColor: STATUS_COLOR[t.status] }]} />
+                      <View style={[styles.listStatusMark, item.status === 'closed' && styles.listStatusMarkUrgent]} />
                       <View style={styles.listRowText}>
                         <Text style={styles.listRowTitle}>
-                          {t.building}{t.floor ? ` · ${t.floor}` : ''}
+                          {item.building}{item.floor ? ` · ${item.floor}` : ''}
                         </Text>
                         <Text style={styles.listRowSub}>
-                          {t.accessible === 1 ? '♿ ผู้พิการ · ' : ''}{STATUS_LABEL[t.status]} · {formatRelativeTime(t.updated_at)}
+                          {item.accessible === 1 ? t.listAccessibleTag : ''}{STATUS_LABEL[item.status]} · {formatRelativeTime(item.updated_at)}
                         </Text>
                       </View>
                       {dist !== null && (
@@ -585,18 +650,18 @@ export default function Index() {
                       )}
                     </TouchableOpacity>
                     <View style={styles.listRowActions}>
-                      <TouchableOpacity onPress={() => navigateTo(t)} activeOpacity={0.7} style={styles.listRowIconBtn}>
-                        <Text style={styles.listRowIconText}>นำทาง</Text>
+                      <TouchableOpacity onPress={() => navigateTo(item)} activeOpacity={0.7} style={styles.listRowIconBtn}>
+                        <Text style={styles.listRowIconText}>{t.listNav}</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity onPress={() => openEditModal(t)} activeOpacity={0.7} style={styles.listRowIconBtn}>
-                        <Text style={styles.listRowIconText}>แก้ไข</Text>
+                      <TouchableOpacity onPress={() => openEditModal(item)} activeOpacity={0.7} style={styles.listRowIconBtn}>
+                        <Text style={styles.listRowIconText}>{t.listEdit}</Text>
                       </TouchableOpacity>
                     </View>
                   </View>
                 );
               })}
               {sortedFilteredToilets.length === 0 && (
-                <Text style={styles.listEmpty}>ไม่พบห้องน้ำที่ตรงเงื่อนไข</Text>
+                <Text style={styles.listEmpty}>{t.listEmpty}</Text>
               )}
             </ScrollView>
             <TouchableOpacity
@@ -604,7 +669,7 @@ export default function Index() {
               onPress={() => setListVisible(false)}
               activeOpacity={0.8}
             >
-              <Text style={styles.btnCancelText}>ปิด</Text>
+              <Text style={styles.btnCancelText}>{t.close}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -619,21 +684,45 @@ export default function Index() {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalSheet}>
-            <Text style={styles.modalTitle}>สิ่งที่คุณช่วยเหลือ</Text>
-            <Text style={styles.modalSub}>ขอบคุณที่ช่วยกันทำให้ข้อมูลในแอปเป็นประโยชน์กับทุกคน</Text>
+            <Text style={styles.modalTitle}>{t.statsTitle}</Text>
+            <Text style={styles.modalSub}>{t.statsSub}</Text>
 
             <View style={styles.statsGrid}>
               <View style={styles.statsCard}>
                 <Text style={styles.statsNumber}>{stats.added}</Text>
-                <Text style={styles.statsLabel}>จุดที่เพิ่ม</Text>
+                <Text style={styles.statsLabel}>{t.statsAdded}</Text>
               </View>
               <View style={styles.statsCard}>
                 <Text style={styles.statsNumber}>{stats.confirmed}</Text>
-                <Text style={styles.statsLabel}>ครั้งที่ยืนยัน</Text>
+                <Text style={styles.statsLabel}>{t.statsConfirmed}</Text>
               </View>
               <View style={styles.statsCard}>
                 <Text style={styles.statsNumber}>{stats.statusUpdated}</Text>
-                <Text style={styles.statsLabel}>อัปเดตสถานะ</Text>
+                <Text style={styles.statsLabel}>{t.statsUpdated}</Text>
+              </View>
+            </View>
+
+            <View style={styles.languageRow}>
+              <Text style={styles.fieldLabel}>{t.languageLabel}</Text>
+              <View style={styles.languageSwitch}>
+                <TouchableOpacity
+                  style={[styles.languageOption, language === 'th' && styles.languageOptionActive]}
+                  onPress={() => setLanguage('th')}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[styles.languageOptionText, language === 'th' && styles.languageOptionTextActive]}>
+                    ไทย
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.languageOption, language === 'en' && styles.languageOptionActive]}
+                  onPress={() => setLanguage('en')}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[styles.languageOptionText, language === 'en' && styles.languageOptionTextActive]}>
+                    EN
+                  </Text>
+                </TouchableOpacity>
               </View>
             </View>
 
@@ -642,7 +731,7 @@ export default function Index() {
               onPress={() => setStatsVisible(false)}
               activeOpacity={0.8}
             >
-              <Text style={styles.btnCancelText}>ปิด</Text>
+              <Text style={styles.btnCancelText}>{t.close}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -652,129 +741,145 @@ export default function Index() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.bg },
+  container: { flex: 1, backgroundColor: C.paper },
 
   header: {
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-    backgroundColor: C.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
+    backgroundColor: C.primary,
+    paddingBottom: 16,
+    borderBottomLeftRadius: 32,
+    borderBottomRightRadius: 32,
   },
-  headerTopRow: {
+  headerCard: {
+    marginHorizontal: 16,
+    backgroundColor: C.surface,
+    borderRadius: 28,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
   },
-  headerMain: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    minHeight: 48,
-  },
-  headerTitle: { fontSize: 20, fontWeight: '800', color: C.text, letterSpacing: -0.3 },
-  headerSub: { fontSize: 13, color: C.textMuted, marginTop: 2, fontWeight: '400' },
-  headerChevron: { fontSize: 20, color: C.primary, fontWeight: '700' },
-  statsBtn: {
-    minWidth: 48,
+  headerIcon: {
+    width: 40,
     height: 40,
-    borderRadius: 10,
-    backgroundColor: C.surface,
+    borderRadius: 20,
+    backgroundColor: 'rgba(13,148,136,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerMain: { flex: 1, minHeight: 44, justifyContent: 'center' },
+  headerTitle: { fontSize: 19, fontWeight: '800', color: C.ink, letterSpacing: 0.3 },
+  headerSub: { fontSize: 12, color: C.inkSoft, marginTop: 3 },
+  statsBtn: {
+    minWidth: 40,
+    height: 36,
+    borderRadius: 18,
     borderWidth: 1.5,
-    borderColor: C.border,
+    borderColor: C.line,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 12,
   },
-  statsBtnText: { fontSize: 12, fontWeight: '700', color: C.text },
+  statsBtnText: { fontSize: 12, fontWeight: '700', color: C.inkSoft },
   addBtn: {
-    minWidth: 48,
-    height: 40,
-    borderRadius: 10,
+    minWidth: 40,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: C.primary,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 12,
   },
-  addBtnText: { fontSize: 12, fontWeight: '700', color: '#FFF' },
-
-  legend: {
-    marginTop: 12,
-    backgroundColor: C.muted,
-    borderRadius: 10,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    flexDirection: 'row',
-    gap: 14,
-    alignSelf: 'flex-start',
-  },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  legendDot: { width: 9, height: 9, borderRadius: 5 },
-  legendText: { fontSize: 11, color: C.text, fontWeight: '600' },
+  addBtnText: { fontSize: 12, fontWeight: '700', color: C.surface },
 
   map: { flex: 1 },
 
   recenterBtn: {
     position: 'absolute',
-    top: '45%',
     right: 12,
     zIndex: 10,
     elevation: 10,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
     backgroundColor: C.surface,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: C.border,
+    borderWidth: 1.5,
+    borderColor: C.line,
   },
-  recenterIcon: { fontSize: 20, color: C.primary },
+  recenterRing: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    borderWidth: 2,
+    borderColor: C.primary,
+  },
 
   resultCard: {
     position: 'absolute',
-    left: 16,
-    right: 16,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: C.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: C.border,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    borderTopWidth: 1.5,
+    borderColor: C.line,
     overflow: 'hidden',
   },
   resultSection: { padding: 16 },
-  resultDivider: { height: 1, backgroundColor: C.border },
+  resultDivider: { height: 1, backgroundColor: C.line },
   resultSectionLabel: {
     fontSize: 11,
     fontWeight: '700',
-    color: C.textMuted,
-    textTransform: 'uppercase',
+    color: C.inkSoft,
     letterSpacing: 0.3,
     marginBottom: 10,
   },
-  resultTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  resultBuilding: { flex: 1, fontSize: 17, fontWeight: '800', color: C.text },
-  resultCloseBtn: {
+  resultTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  resultBuilding: { flex: 1, fontSize: 17, fontWeight: '800', color: C.ink },
+  resultIconBtn: {
     width: 28,
     height: 28,
     borderRadius: 14,
-    backgroundColor: C.muted,
+    backgroundColor: C.paper,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  resultCloseText: { fontSize: 13, fontWeight: '700', color: C.textMuted },
-  resultAccessible: { fontSize: 12, color: C.accessible, marginTop: 6, fontWeight: '600' },
-  resultDistance: { fontSize: 16, fontWeight: '700', color: C.primaryDark, marginTop: 6 },
-  resultWalkLoading: { fontSize: 13, color: C.textMuted, marginTop: 6 },
+  resultIconBtnText: { fontSize: 13, fontWeight: '700', color: C.inkSoft },
+  resultNavRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+    marginTop: 10,
+  },
+  resultNavArrow: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: C.paper,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  resultNavArrowText: { fontSize: 18, fontWeight: '800', color: C.primaryDark },
+  resultNavPosition: { fontSize: 12, fontWeight: '700', color: C.inkSoft },
+  resultDistance: { fontSize: 22, fontWeight: '800', color: C.ink, marginTop: 8, letterSpacing: -0.3 },
+  resultWalkLoading: { fontSize: 13, color: C.inkSoft, marginTop: 8 },
   statusRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
   statusChip: {
+    borderRadius: 20,
     borderWidth: 1.5,
-    borderColor: C.border,
-    borderRadius: 8,
+    borderColor: C.line,
     paddingVertical: 7,
-    paddingHorizontal: 11,
+    paddingHorizontal: 12,
   },
-  statusChipText: { fontSize: 12, fontWeight: '700', color: C.textMuted },
+  statusChipActive: { borderColor: C.primary, backgroundColor: C.primary },
+  statusChipUrgent: { borderColor: C.urgent, backgroundColor: C.urgent },
+  statusChipText: { fontSize: 12, fontWeight: '700', color: C.inkSoft },
+  statusChipActiveText: { color: C.surface },
+  statusChipUrgentText: { color: C.surface },
   updatedRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -782,24 +887,24 @@ const styles = StyleSheet.create({
     marginTop: 14,
     gap: 8,
   },
-  updatedText: { fontSize: 12, color: C.textMuted },
-  confirmText: { fontSize: 12, color: C.primary, fontWeight: '700' },
+  updatedText: { fontSize: 12, color: C.inkSoft },
+  confirmText: { fontSize: 12, color: C.primaryDark, fontWeight: '700' },
   resultCardActions: { flexDirection: 'row', gap: 10, padding: 16 },
   resultNavBtn: {
     flex: 1,
     backgroundColor: C.primary,
-    borderRadius: 10,
+    borderRadius: 20,
     paddingVertical: 12,
     minHeight: 44,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  resultNavText: { color: '#FFF', fontSize: 14, fontWeight: '700' },
+  resultNavText: { color: C.surface, fontSize: 14, fontWeight: '700' },
   resultDeleteBtn: {
     flex: 1,
+    borderRadius: 20,
     borderWidth: 1.5,
     borderColor: C.urgent,
-    borderRadius: 10,
     paddingVertical: 12,
     minHeight: 44,
     alignItems: 'center',
@@ -812,64 +917,68 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 14,
     borderTopWidth: 1,
-    borderTopColor: C.border,
-    gap: 10,
+    borderTopColor: C.line,
   },
   btnFind: {
     backgroundColor: C.primary,
-    borderRadius: 14,
+    borderRadius: 24,
     paddingVertical: 17,
     minHeight: 56,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  btnFindText: { color: '#FFF', fontSize: 17, fontWeight: '800', letterSpacing: 0.2 },
-  urgentRow: { flexDirection: 'row', gap: 10 },
+  btnFindText: { color: C.surface, fontSize: 17, fontWeight: '800', letterSpacing: 0.3 },
+  urgentRow: { flexDirection: 'row', gap: 10, marginTop: 20 },
   btnUrgent: {
     flex: 1,
     backgroundColor: C.urgent,
-    borderRadius: 12,
+    borderRadius: 20,
     paddingVertical: 13,
     minHeight: 48,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  btnUrgentText: { color: '#FFF', fontSize: 14, fontWeight: '800' },
+  btnUrgentText: { color: C.surface, fontSize: 14, fontWeight: '800' },
   btnUrgentAccessible: {
-    width: 56,
+    minWidth: 100,
     minHeight: 48,
-    backgroundColor: C.accessible,
-    borderRadius: 12,
+    backgroundColor: C.surface,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: C.line,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
   },
-  btnUrgentAccessibleText: { fontSize: 20 },
+  btnUrgentAccessibleText: { color: C.ink, fontSize: 13, fontWeight: '800' },
 
   modalOverlay: {
     flex: 1,
     justifyContent: 'flex-end',
-    backgroundColor: 'rgba(15,23,23,0.45)',
+    backgroundColor: 'rgba(28,37,33,0.35)',
   },
   modalSheet: {
     backgroundColor: C.surface,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
     padding: 24,
     paddingBottom: 32,
   },
-  modalTitle: { fontSize: 20, fontWeight: '800', color: C.text, marginBottom: 4 },
-  modalSub: { fontSize: 13, color: C.textMuted, marginBottom: 20 },
+  modalTitle: { fontSize: 20, fontWeight: '800', color: C.ink, marginBottom: 4 },
+  modalSub: { fontSize: 13, color: C.inkSoft, marginBottom: 20 },
 
-  fieldLabel: { fontSize: 12, fontWeight: '700', color: C.text, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.3 },
+  fieldLabel: { fontSize: 12, fontWeight: '700', color: C.inkSoft, marginBottom: 6 },
   input: {
     borderWidth: 1.5,
-    borderColor: C.border,
-    borderRadius: 10,
+    borderColor: C.line,
+    borderRadius: 20,
     paddingHorizontal: 14,
     paddingVertical: 13,
     fontSize: 15,
-    color: C.text,
-    backgroundColor: C.muted,
+    color: C.ink,
+    backgroundColor: C.paper,
     marginBottom: 16,
     minHeight: 48,
   },
@@ -883,26 +992,26 @@ const styles = StyleSheet.create({
   modalActions: { flexDirection: 'row', gap: 12 },
   btnCancel: {
     flex: 1,
+    borderRadius: 20,
     borderWidth: 1.5,
-    borderColor: C.border,
-    borderRadius: 12,
+    borderColor: C.line,
     paddingVertical: 14,
     minHeight: 48,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  btnCancelText: { fontSize: 15, fontWeight: '700', color: C.textMuted },
+  btnCancelText: { fontSize: 15, fontWeight: '700', color: C.inkSoft },
   btnSave: {
     flex: 2,
     backgroundColor: C.primary,
-    borderRadius: 12,
+    borderRadius: 20,
     paddingVertical: 14,
     minHeight: 48,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  btnSaveText: { fontSize: 15, fontWeight: '700', color: '#FFF' },
-  btnDisabled: { opacity: 0.6 },
+  btnSaveText: { fontSize: 15, fontWeight: '700', color: C.surface },
+  btnDisabled: { opacity: 0.5 },
 
   listSheet: { maxHeight: '80%' },
   listHeader: {
@@ -912,25 +1021,25 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   filterChip: {
-    borderWidth: 1.5,
-    borderColor: C.border,
     borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: C.line,
     paddingVertical: 7,
     paddingHorizontal: 12,
     minHeight: 32,
   },
-  filterChipActive: { backgroundColor: C.accessible, borderColor: C.accessible },
-  filterChipText: { fontSize: 12, fontWeight: '700', color: C.textMuted },
-  filterChipTextActive: { color: '#FFF' },
+  filterChipActive: { backgroundColor: C.primary, borderColor: C.primary },
+  filterChipText: { fontSize: 12, fontWeight: '700', color: C.inkSoft },
+  filterChipActiveText: { color: C.surface },
   searchInput: {
     borderWidth: 1.5,
-    borderColor: C.border,
-    borderRadius: 10,
+    borderColor: C.line,
+    borderRadius: 20,
     paddingHorizontal: 14,
     paddingVertical: 11,
     fontSize: 14,
-    color: C.text,
-    backgroundColor: C.muted,
+    color: C.ink,
+    backgroundColor: C.paper,
     marginTop: 12,
     minHeight: 44,
   },
@@ -940,27 +1049,53 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: C.border,
+    borderBottomColor: C.line,
     gap: 10,
   },
   listRowMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  listStatusMark: { width: 9, height: 9, borderRadius: 5, backgroundColor: C.primary },
+  listStatusMarkUrgent: { backgroundColor: C.urgent },
   listRowText: { flex: 1 },
-  listRowTitle: { fontSize: 15, fontWeight: '700', color: C.text },
-  listRowSub: { fontSize: 12, color: C.textMuted, marginTop: 2 },
+  listRowTitle: { fontSize: 15, fontWeight: '700', color: C.ink },
+  listRowSub: { fontSize: 12, color: C.inkSoft, marginTop: 2 },
   listRowDist: { fontSize: 14, fontWeight: '700', color: C.primaryDark },
   listRowActions: { flexDirection: 'row', gap: 4 },
   listRowIconBtn: { paddingVertical: 8, paddingHorizontal: 8, minHeight: 40, justifyContent: 'center' },
-  listRowIconText: { fontSize: 12, fontWeight: '700', color: C.primary },
-  listEmpty: { textAlign: 'center', color: C.textMuted, fontSize: 14, paddingVertical: 24 },
+  listRowIconText: { fontSize: 12, fontWeight: '700', color: C.primaryDark },
+  listEmpty: { textAlign: 'center', color: C.inkSoft, fontSize: 14, paddingVertical: 24 },
 
   statsGrid: { flexDirection: 'row', gap: 10, marginBottom: 24 },
   statsCard: {
     flex: 1,
-    backgroundColor: C.muted,
-    borderRadius: 14,
+    borderRadius: 22,
+    borderWidth: 1.5,
+    borderColor: C.line,
     paddingVertical: 18,
     alignItems: 'center',
   },
-  statsNumber: { fontSize: 28, fontWeight: '800', color: C.primary },
-  statsLabel: { fontSize: 12, color: C.textMuted, marginTop: 4, textAlign: 'center' },
+  statsNumber: { fontSize: 28, fontWeight: '800', color: C.primaryDark },
+  statsLabel: { fontSize: 11, color: C.inkSoft, marginTop: 4, textAlign: 'center' },
+
+  languageRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 24,
+  },
+  languageSwitch: {
+    flexDirection: 'row',
+    borderRadius: 18,
+    borderWidth: 1.5,
+    borderColor: C.line,
+    padding: 3,
+    gap: 3,
+  },
+  languageOption: {
+    paddingVertical: 7,
+    paddingHorizontal: 16,
+    borderRadius: 15,
+  },
+  languageOptionActive: { backgroundColor: C.primary },
+  languageOptionText: { fontSize: 13, fontWeight: '700', color: C.inkSoft },
+  languageOptionTextActive: { color: C.surface },
 });

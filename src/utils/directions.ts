@@ -1,6 +1,6 @@
 import type { LocationCoords } from '../hooks/useLocation';
 
-const GOOGLE_MAPS_API_KEY = 'AIzaSyC4ZPjFPCjhcO4_TMS-h4sTqoyjpXa3KQE';
+const GOOGLE_MAPS_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY ?? '';
 
 export type WalkingRoute = {
   distanceMeters: number;
